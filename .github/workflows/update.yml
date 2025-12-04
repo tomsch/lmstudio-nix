@@ -1,0 +1,84 @@
+name: Auto Update
+
+on:
+  schedule:
+    - cron: '0 14 * * *'  # Daily at 14:00 UTC
+  workflow_dispatch:      # Manual trigger
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Check for updates
+        id: check
+        run: |
+          # Get latest version from LM Studio download page
+          PAGE=$(curl -sL "https://lmstudio.ai/download")
+
+          # Extract version from JSON data in page (linux x64 version)
+          VERSION=$(echo "$PAGE" | grep -oP '"linux":\s*\{"x64":\s*\{"version":\s*"\K[^"]+' | head -1)
+          BUILD=$(echo "$PAGE" | grep -oP '"linux":\s*\{"x64":\s*\{"version":\s*"[^"]+",\s*"build":\s*"\K[^"]+' | head -1)
+
+          if [ -n "$BUILD" ] && [ "$BUILD" != "null" ]; then
+            FULL_VERSION="${VERSION}-${BUILD}"
+          else
+            FULL_VERSION="$VERSION"
+          fi
+
+          CURRENT=$(grep 'version = ' package.nix | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "latest=$FULL_VERSION" >> $GITHUB_OUTPUT
+
+          if [ "$FULL_VERSION" != "$CURRENT" ] && [ -n "$FULL_VERSION" ]; then
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+          else
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update package
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          VERSION="${{ steps.check.outputs.latest }}"
+          URL="https://installers.lmstudio.ai/linux/x64/${VERSION}/LM-Studio-${VERSION}-x64.AppImage"
+
+          # Get new hash
+          HASH=$(nix-prefetch-url "$URL" 2>&1 | tail -1)
+          SRI_HASH=$(nix hash convert --to sri --hash-algo sha256 "$HASH")
+
+          # Update package.nix
+          sed -i "s/version = \".*\"/version = \"$VERSION\"/" package.nix
+          sed -i "s|hash = \"sha256-.*\"|hash = \"$SRI_HASH\"|" package.nix
+
+      - name: Test build
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          nix build .#lmstudio --accept-flake-config --impure
+
+      - name: Commit and push
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.nix
+          git commit -m "Update lmstudio to ${{ steps.check.outputs.latest }}"
+          git push
+
+      - name: Create Release
+        if: steps.check.outputs.needs_update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.check.outputs.latest }}" \
+            --title "LM Studio ${{ steps.check.outputs.latest }}" \
+            --notes "Updated LM Studio from ${{ steps.check.outputs.current }} to ${{ steps.check.outputs.latest }}"
