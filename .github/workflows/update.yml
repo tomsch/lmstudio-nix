@@ -52,13 +52,19 @@ jobs:
           VERSION="${{ steps.check.outputs.latest }}"
           URL="https://installers.lmstudio.ai/linux/x64/${VERSION}/LM-Studio-${VERSION}-x64.AppImage"
 
-          # Get new hash
-          HASH=$(nix-prefetch-url "$URL" 2>&1 | tail -1)
+          # Get new hash (nix-prefetch-url outputs hash on stdout, progress on stderr)
+          HASH=$(nix-prefetch-url "$URL" 2>/dev/null)
           SRI_HASH=$(nix hash convert --to sri --hash-algo sha256 "$HASH")
 
-          # Update package.nix
-          sed -i "s/version = \".*\"/version = \"$VERSION\"/" package.nix
-          sed -i "s|hash = \"sha256-.*\"|hash = \"$SRI_HASH\"|" package.nix
+          # Validate hash before proceeding
+          if [[ ! "$SRI_HASH" =~ ^sha256- ]]; then
+            echo "ERROR: Invalid SRI hash: $SRI_HASH"
+            exit 1
+          fi
+
+          # Update package.nix (use non-greedy match by stopping at quote)
+          sed -i "s/version = \"[^\"]*\"/version = \"$VERSION\"/" package.nix
+          sed -i "s|hash = \"sha256-[^\"]*\"|hash = \"$SRI_HASH\"|" package.nix
 
       - name: Test build
         if: steps.check.outputs.needs_update == 'true'
